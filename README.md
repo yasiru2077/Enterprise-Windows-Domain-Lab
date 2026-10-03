@@ -1,693 +1,185 @@
-# Enterprise Windows Domain Lab — New Employee Onboarding with Active Directory, DNS & Group Policy
+# New Hire, New Domain
+### An Active Directory Home Lab — Onboarding a Sales Employee, End to End
 
-> **Hands-on IT Support / Systems Administration Case Study**  
-> A small enterprise-style Windows domain was built in VMware to simulate a real helpdesk request: onboard a new Sales employee, provide access to company resources, enforce account security, and troubleshoot the resulting environment.
-
----
-
-## Case Study Overview
-
-This lab was designed as a practical simulation of an **IT support / systems administration onboarding ticket** rather than a collection of isolated configuration exercises.
-
-The scenario centers on **John Doe**, a new Sales employee. The objective was to create and organize his domain account, connect his Windows workstation to the company domain, provide department-specific resources, and demonstrate how a support engineer would diagnose and resolve an account-security incident.
-
-The lab was completed inside an isolated VMware environment using a Windows Server 2022 domain controller and a Windows 11 Pro client.
-
-### Scenario
-
-**Situation:** A new Sales employee needs a working corporate Windows account and workstation.
-
-**Task:** Build the underlying Active Directory environment and complete the employee onboarding workflow.
-
-**Actions:**
-
-- Configure a Windows Server 2022 virtual machine as the domain controller.
-- Configure static networking and DNS.
-- Install **Active Directory Domain Services (AD DS)** and promote the server to a domain controller.
-- Create the `corp.local` domain and a basic OU structure.
-- Create the Sales user account and security group membership.
-- Apply password and account-lockout policies with Group Policy.
-- Create a Windows 11 client named `SALES-PC01` and join it to the domain.
-- Move the workstation into the Sales OU.
-- Publish a department network drive and shared printer through Group Policy.
-- Simulate a real helpdesk security ticket by locking the user account, verifying the lockout on the domain controller, and recovering the account.
-
-**Result:** The lab demonstrates an end-to-end employee onboarding workflow covering identity, endpoint configuration, network services, resource access, policy enforcement, and support troubleshooting.
+> Built from scratch in VMware Workstation to simulate the exact workflow an IT Support / Helpdesk tech performs when a new employee joins: standing up a domain, provisioning an account, pushing policy, joining a workstation, and resolving a lockout ticket.
 
 ---
 
-## Lab Objectives
-
-The lab was structured around nine practical outcomes:
-
-| Phase | Objective | Status |
-|---|---|---|
-| 1 | Configure the server and static IP | ✅ Completed |
-| 2 | Install AD DS and promote the server to a domain controller | ✅ Completed |
-| 3 | Build the Active Directory OU structure | ✅ Completed |
-| 4 | Create the employee account and security group | ✅ Completed |
-| 5 | Configure password/account-lockout policy | ✅ Completed |
-| 6 | Create and domain-join the Windows client | ✅ Completed |
-| 7 | Deploy department resources through Group Policy | ✅ Completed |
-| 8 | Simulate and resolve the helpdesk account-lockout ticket | ✅ Completed |
-| 9 | Capture evidence and document the environment | ✅ Completed |
+## Table of Contents
+- [Scenario](#scenario)
+- [Environment & Tools](#environment--tools)
+- [Architecture](#architecture)
+- [Build Walkthrough](#build-walkthrough)
+  1. [Promote the Domain Controller](#1-promote-the-domain-controller)
+  2. [Build the OU Structure](#2-build-the-ou-structure)
+  3. [Create the User & Security Group](#3-create-the-user--security-group)
+  4. [Configure Password & Lockout Policy](#4-configure-password--lockout-policy)
+  5. [Join the Workstation to the Domain](#5-join-the-workstation-to-the-domain)
+  6. [Push Resources via Group Policy](#6-push-resources-via-group-policy)
+- [The Troubleshooting Moment: A Real GPO Precedence Bug](#the-troubleshooting-moment-a-real-gpo-precedence-bug)
+- [The Ticket: Account Lockout → Resolution](#the-ticket-account-lockout--resolution)
+- [What This Demonstrates](#what-this-demonstrates)
+- [Known Simplifications](#known-simplifications)
 
 ---
 
-## Technologies & Tools
+## Scenario
 
-| Area | Technology / Tool |
+A new employee, **John Doe**, is joining the **Sales** department. This lab simulates the IT work required to get him productive on day one: an Active Directory account, a security group, a domain-joined workstation, a mapped department drive, and a shared printer — all delivered the way a real company would deliver them, through Group Policy rather than manual configuration on each machine.
+
+Partway through, the lab also produced a **real, unplanned bug** — a Group Policy precedence conflict that silently disabled the account lockout policy — which turned into its own troubleshooting exercise (see below). That bug, and fixing it, is arguably the most representative part of this project, since it's the kind of thing you only encounter by actually building the thing rather than reading about it.
+
+## Environment & Tools
+
+| Component | Details |
 |---|---|
-| Virtualization | VMware Workstation |
-| Server OS | Windows Server 2022 |
-| Client OS | Windows 11 Pro |
-| Directory Services | Active Directory Domain Services (AD DS) |
-| Name Resolution | DNS Server / Windows DNS |
-| Policy Management | Group Policy Management / Group Policy Objects (GPOs) |
-| Directory Administration | Active Directory Users and Computers (ADUC) |
-| Network Diagnostics | `ipconfig`, `ping`, `nslookup` |
-| Policy Diagnostics | `gpupdate`, `rsop.msc` |
-| File Access | Windows SMB share |
-| Printing | Windows shared printer |
+| Hypervisor | VMware Workstation Pro 26H1 |
+| Domain Controller | `DC01` — Windows Server 2022 Standard (Evaluation), Desktop Experience |
+| Client Workstation | `SALES-PC01` — Windows 11 Pro (26H2) |
+| Domain | `corp.local` |
+| Network | VMware NAT, `192.168.241.0/24` |
+| Roles Installed | AD DS, DNS (auto-installed with AD DS) |
 
----
-
-## Lab Architecture
+## Architecture
 
 ```mermaid
-flowchart TB
-    HOST[Physical Host]
-    VMNET[VMware Virtual Network]
-
-    HOST --> VMNET
-
-    subgraph LAB[Isolated Windows Domain Lab]
-        DC[DC01<br/>Windows Server 2022<br/>192.168.234.10]
-        SERVICES[AD DS + DNS + GPO<br/>SalesShare + SalesPrinter]
-        CLIENT[SALES-PC01<br/>Windows 11 Pro]
-        USER[jdoe<br/>John Doe — Sales]
-
-        DC --> SERVICES
-        CLIENT -->|Domain member| DC
-        USER -->|Signs in to| CLIENT
-        SERVICES -->|S: mapped drive| CLIENT
-        SERVICES -->|Shared printer| CLIENT
+graph TB
+    subgraph NET["VMware NAT Network — 192.168.241.0/24"]
+        DC["🖥️ DC01<br/>Windows Server 2022<br/>192.168.241.10<br/>Domain Controller + DNS"]
+        PC["💻 SALES-PC01<br/>Windows 11 Pro<br/>DHCP-assigned IP<br/>Domain-joined client"]
+        DC -->|"AD DS · DNS · Group Policy"| PC
     end
-
-    VMNET --> DC
-    VMNET --> CLIENT
 ```
 
-### Core design
-
-The lab uses a simple single-domain model:
-
-- **Domain:** `corp.local`
-- **Domain Controller:** `DC01`
-- **Domain Controller IP:** `192.168.234.10`
-- **Client:** `SALES-PC01`
-- **Employee:** `jdoe` / John Doe
-- **Department OU:** `Sales`
-- **Security Group:** `Sales Team`
-- **Network Share:** `\DC01\SalesShare`
-- **Shared Printer:** `\DC01\SalesPrinter`
-
-The gateway used in the VMware network was `192.168.234.2`, while the domain controller itself was configured as the primary DNS server for domain clients.
-
----
-
-# Implementation Walkthrough
-
-## 1. Build the Windows Server 2022 Domain Controller
-
-The first stage was creating the server virtual machine that would become the foundation of the lab.
-
-The server was configured with approximately:
-
-- **Windows Server 2022**
-- **60 GB virtual disk**
-- **4 GB RAM**
-- **2 virtual processors**
-- VMware networking enabled
-- Server hostname: **`DC01`**
-
-A clean VM snapshot was also used during the setup process so the environment could be recovered while troubleshooting.
-
-![VMware new virtual machine wizard](screenshots/01_vmware_new_vm_wizard.png)
-
-*Figure 1 — VMware virtual-machine creation stage.*
-
----
-
-## 2. Configure Static Networking and DNS
-
-Before Active Directory was installed, the server needed a stable network identity. The server initially received an address through VMware networking and was then converted to a static configuration.
-
-The lab configuration used:
-
-```text
-IP address      : 192.168.234.10
-Subnet mask     : 255.255.255.0
-Gateway         : 192.168.234.2
-Preferred DNS   : 192.168.234.10
-```
-
-Connectivity was checked from the command line with:
-
-```bat
-ipconfig /all
-ping 192.168.234.2
-nslookup google.com
-ping google.com
-```
-
-This stage also reinforced an important troubleshooting distinction: a system can have working local network connectivity while still having a DNS or domain-resolution problem.
-
-![DC01 network configuration](screenshots/02_dc01_ipconfig.png)
-
-*Figure 2 — `ipconfig /all` verification on DC01.*
-
----
-
-## 3. Install Active Directory Domain Services
-
-The **Active Directory Domain Services** server role was installed through Server Manager.
-
-After the role installation completed, the server was promoted to a domain controller and a new forest/domain was created.
-
-```text
-Domain: corp.local
-Domain Controller: DC01
-```
-
-DNS was installed as part of the domain-controller configuration, allowing the client workstation to discover the domain through the DC's DNS service.
-
-![AD DS installation](screenshots/03_ad_ds_installation.png)
-
-*Figure 3 — AD DS role installation completed successfully.*
-
----
-
-## 4. Build the Active Directory Structure
-
-A small OU hierarchy was created to represent a realistic departmental structure instead of leaving every object in the default containers.
-
-The lab included:
-
-```text
-corp.local
-├── Sales
-├── HR
-└── IT
-```
-
-The Sales OU became the location for the employee's user account and workstation-related policy targeting.
-
-![Active Directory OU structure](screenshots/04_ad_users_and_computers_ous.png)
-
-*Figure 4 — Active Directory Users and Computers showing the departmental OU structure.*
-
----
-
-## 5. Create the Employee Account and Security Group
-
-The new employee was created in Active Directory as:
-
-```text
-Name      : John Doe
-Username  : jdoe
-Department: Sales
-```
-
-A department security group named **`Sales Team`** was created, and the employee was added to it.
-
-The account and group structure provided a clean foundation for future access control and department-specific policy deployment.
-
-A key support principle demonstrated here is to organize users and resources by business function rather than relying entirely on default Active Directory containers.
-
----
-
-## 6. Implement Password and Account-Lockout Policies with GPO
-
-A dedicated **Password Policy** GPO was created and linked to the domain.
-
-The lab used an account-security configuration centered around:
-
-- password history enforcement
-- maximum password age
-- minimum password age
-- minimum password length
-- account lockout threshold
-- lockout duration
-- lockout counter reset duration
-
-The account-lockout portion of the lab ultimately used:
-
-```text
-Account lockout threshold : 5 invalid logon attempts
-Account lockout duration   : 30 minutes
-Reset lockout counter     : 30 minutes
-```
-
-![Password policy GPO](screenshots/05_group_policy_password_policy.png)
-
-*Figure 5 — Group Policy configuration used to control password/account security.*
-
-### Why this became a troubleshooting exercise
-
-The first lockout tests did not behave as expected. Investigation showed that the policy was not taking precedence exactly as intended. The troubleshooting process included:
-
-```bat
-gpupdate /force
-```
-
-and checking the effective policy with:
-
-```text
-rsop.msc
-```
-
-The GPO link/order was then corrected so that the intended password policy took precedence.
-
-This turned a simple configuration task into a realistic support scenario: **the setting exists, but the effective policy is what matters.**
-
----
-
-## 7. Build the Windows 11 Sales Workstation
-
-A second VM was created to represent the employee's workstation:
-
-```text
-Hostname : SALES-PC01
-OS       : Windows 11 Pro
-RAM      : 4 GB
-CPU      : 2 vCPU
-Disk     : 60 GB
-Network  : VMware NAT
-```
-
-Because Windows 11 requires modern hardware security support, the virtual machine was configured with **vTPM** during setup.
-
-The workstation was initially installed with a local account and then prepared for domain membership.
-
----
-
-## 8. Join SALES-PC01 to the Domain
-
-Before domain joining, the client was configured to use the domain controller as its DNS server:
-
-```text
-Preferred DNS: 192.168.234.10
-```
-
-Connectivity was validated with:
-
-```bat
-ping 192.168.234.10
-ping corp.local
-```
-
-The workstation was then joined to:
-
-```text
-corp.local
-```
-
-using a domain-authorized account.
-
-![Domain login](screenshots/06_domain_login.png)
-
-*Figure 6 — Windows client showing the domain sign-in stage.*
-
-After the join succeeded, the computer object was moved from the default **Computers** container into the **Sales** OU so that department-specific GPOs could target the workstation.
-
-![Sales OU workstation structure](screenshots/07_sales_ou_structure.png)
-
-*Figure 7 — `SALES-PC01` positioned under the Sales OU.*
-
----
-
-# 9. Deploy the Sales Network Drive Through GPO
-
-To simulate a real employee onboarding workflow, a department file share was created on `DC01`.
-
-### Shared resource
-
-```text
-\DC01\SalesShare
-```
-
-A Group Policy Object named **Sales Drive Mapping** was linked to the Sales OU and configured to map the share automatically for Sales users.
-
-The client was refreshed with:
-
-```bat
-gpupdate /force
-```
-
-The expected result was a mapped **S:** drive on `SALES-PC01`.
-
-![Mapped Sales drive](screenshots/08_mapped_sales_drive.png)
-
-*Figure 8 — Sales network share mapped to the client workstation.*
-
-### Support lesson
-
-When a GPO appears not to work, the first useful checks are:
-
-1. Is the workstation actually in the correct OU?
-2. Is the GPO linked to that OU or an inherited parent?
-3. Is the client receiving the policy?
-4. Does `gpupdate /force` complete successfully?
-5. What does `rsop.msc` show as the effective policy?
-6. Is the network share itself reachable?
-
----
-
-# 10. Deploy the Sales Printer Through GPO
-
-A shared printer named **SalesPrinter** was created on `DC01` and published as a network resource.
-
-```text
-\DC01\SalesPrinter
-```
-
-A second GPO, **Sales Printer Mapping**, was targeted at the Sales OU.
-
-The client was refreshed and the printer was verified from the Windows printer settings.
-
-![Printer on SALES-PC01](screenshots/09_printer_on_client.png)
-
-*Figure 9 — Shared printer available on the Sales workstation.*
-
-The printer step was included because onboarding is not just about creating accounts. In a real environment, a new employee normally needs access to the same shared resources their team already uses.
-
----
-
-# 11. Simulate a Real Helpdesk Account-Lockout Ticket
-
-The final technical stage converted the lab from a configuration exercise into a support scenario.
-
-### Ticket scenario
-
-> **User:** John Doe — Sales  
-> **Issue:** Account cannot authenticate after several failed sign-in attempts.  
-> **Support task:** Determine whether the domain account is locked, verify the policy that caused the lockout, and recover the account.
-
-The first lockout attempts did not trigger the expected state. That led to additional troubleshooting rather than assuming the policy was working.
-
-The investigation included checking the account in **Active Directory Users and Computers**, validating the lockout policy on the domain controller, and testing authentication again.
-
-Repeated invalid authentication attempts were generated with domain credentials. The troubleshooting also required clearing existing SMB sessions before retesting credentials:
-
-```bat
-net use * /delete
-```
-
-A direct credential test was then performed using `runas`, allowing each authentication attempt to reach the domain explicitly:
-
-```bat
-runas /user:corp\jdoe cmd
-```
-
-After the threshold was reached, the system returned the expected locked-account condition (Windows error **1909**), confirming that the domain account had been locked.
-
-![Account lockout policy](screenshots/10_account_lockout_policy.png)
-
-*Figure 10 — Effective account-lockout policy after GPO troubleshooting and precedence correction.*
-
-### Recovery procedure
-
-Once the lockout was confirmed, the support workflow was:
-
-1. Open **Active Directory Users and Computers**.
-2. Locate the `jdoe` account under the Sales OU.
-3. Open the account properties.
-4. Clear the **Unlock account** condition.
-5. Reset the password as required.
-6. Return to `SALES-PC01` and validate a successful sign-in.
-
-This produced the final support lifecycle:
-
-```text
-Onboard user
-     ↓
-Join workstation
-     ↓
-Deploy resources
-     ↓
-Apply security policy
-     ↓
-Incident occurs
-     ↓
-Troubleshoot
-     ↓
-Verify lockout
-     ↓
-Unlock / reset
-     ↓
-Retest
+```mermaid
+graph TD
+    Domain["corp.local"] --> HR["HR (OU)"]
+    Domain --> IT["IT (OU)"]
+    Domain --> Sales["Sales (OU)"]
+    Sales --> User["John Doe — User"]
+    Sales --> Group["Sales Team — Security Group"]
+    Sales --> Computer["SALES-PC01 — Computer"]
+    Sales --> GPO1["GPO: Password Policy"]
+    Sales --> GPO2["GPO: Sales Drive Mapping"]
+    Sales --> GPO3["GPO: Sales Printer Mapping"]
+    Group -.-> User
 ```
 
 ---
 
-# Troubleshooting Case Study
+## Build Walkthrough
 
-One of the strongest parts of this lab was that several configuration steps did not work immediately. Instead of treating those as failures, they became the core of the practical troubleshooting exercise.
+### 1. Promote the Domain Controller
+`DC01` was installed with a static IP (`192.168.241.10`) pointing at itself for DNS, then promoted via **Add Roles and Features → Active Directory Domain Services → Promote this server to a domain controller**, creating a new forest: `corp.local`.
 
-## Issue 1 — Network / Internet behaviour
+![Domain controller promoted — Local Server showing Domain: corp.local](screenshots/01-domain-controller-promoted.png)
 
-The lab distinguished between:
+### 2. Build the OU Structure
+Three department-based Organizational Units were created under the domain root — `HR`, `IT`, and `Sales` — mirroring how a real company segments users, groups, and computers for delegation and Group Policy targeting.
 
-- local network connectivity
-- gateway reachability
-- DNS resolution
-- domain-name resolution
-- external connectivity
+![OU structure in Active Directory Users and Computers](screenshots/02-ou-structure.png)
 
-Useful commands were:
+### 3. Create the User & Security Group
+Inside the `Sales` OU: a user account (`jdoe` / John Doe) with **"User must change password at next logon"** enabled, and a security group (`Sales Team`) with John Doe added as a member.
 
-```bat
-ipconfig /all
-ping 192.168.234.2
-ping 192.168.234.10
-nslookup google.com
-ping google.com
-```
+![John Doe and Sales Team created inside the Sales OU](screenshots/03-user-and-group-created.png)
+![Sales Team group membership showing John Doe](screenshots/04-security-group-membership.png)
 
-This avoided the common mistake of treating every “no internet” symptom as the same problem.
+### 4. Configure Password & Lockout Policy
+A dedicated GPO (`Password Policy`) was linked at the domain root, defining:
 
-## Issue 2 — Group Policy appeared not to apply
-
-The mapped drive / account-security behaviour was initially inconsistent.
-
-The fix involved:
-
-```bat
-gpupdate /force
-```
-
-followed by **Resultant Set of Policy** inspection with:
-
-```text
-rsop.msc
-```
-
-The policy link order and precedence were then corrected so the custom Password Policy could take effect over the default policies.
-
-## Issue 3 — Account lockout testing did not trigger
-
-The first attempts at forcing a lockout were affected by existing authenticated sessions and policy/application state.
-
-The retest process became:
-
-```bat
-net use * /delete
-runas /user:corp\jdoe cmd
-```
-
-with intentionally invalid credentials.
-
-After the policy was confirmed as effective and the authentication attempts were reaching the domain, the account finally entered the locked state and Windows returned the expected error condition.
-
-### Key troubleshooting lesson
-
-**Never stop at “the setting exists.”** A support engineer must verify the effective configuration, the actual authentication path, and the state of the affected resource.
-
----
-
-# Final Environment State
-
-```text
-Windows Server 2022
-└── DC01
-    ├── Active Directory Domain Services
-    ├── DNS
-    ├── corp.local
-    ├── Sales OU
-    │   ├── John Doe (jdoe)
-    │   └── SALES-PC01
-    ├── HR OU
-    ├── IT OU
-    ├── Sales Team security group
-    ├── SalesShare
-    └── SalesPrinter
-
-Windows 11 Pro
-└── SALES-PC01
-    ├── Domain joined: corp.local
-    ├── S: → \DC01\SalesShare
-    └── SalesPrinter → \DC01\SalesPrinter
-```
-
----
-
-# What This Lab Demonstrates
-
-This case study demonstrates practical experience with the following areas:
-
-### Active Directory
-
-- Domain controller deployment
-- Forest/domain creation
-- OU design
-- User creation
-- Security groups
-- Computer objects
-- Domain joins
-- Account recovery
-
-### Windows Administration
-
-- Windows Server 2022 setup
-- Windows 11 workstation deployment
-- Hostname and network configuration
-- Shared folders and printer administration
-- Authentication and account lifecycle operations
-
-### Networking
-
-- IPv4 configuration
-- Static addressing
-- Gateway testing
-- DNS troubleshooting
-- Domain name resolution
-- Client/server connectivity testing
-
-### Group Policy
-
-- GPO creation
-- OU targeting
-- Password policy
-- Account-lockout policy
-- Drive mapping
-- Printer deployment
-- Policy precedence
-- Effective-policy troubleshooting
-
-### IT Support
-
-- Translating a user problem into a technical investigation
-- Checking evidence before changing configuration
-- Reproducing an issue safely
-- Verifying the root cause
-- Restoring service
-- Documenting the resolution
-
----
-
-# Evidence Gallery
-
-| Evidence | Screenshot |
+| Setting | Value |
 |---|---|
-| VMware VM creation | `01_vmware_new_vm_wizard.png` |
-| DC01 network configuration | `02_dc01_ipconfig.png` |
-| AD DS installation | `03_ad_ds_installation.png` |
-| AD OU structure | `04_ad_users_and_computers_ous.png` |
-| Password policy | `05_group_policy_password_policy.png` |
-| Domain sign-in | `06_domain_login.png` |
-| Sales OU / workstation placement | `07_sales_ou_structure.png` |
-| Mapped Sales drive | `08_mapped_sales_drive.png` |
-| Shared printer on client | `09_printer_on_client.png` |
-| Account-lockout policy evidence | `10_account_lockout_policy.png` |
+| Enforce password history | 5 passwords remembered |
+| Maximum password age | 60 days |
+| Minimum password age | 1 day |
+| Minimum password length | 8 characters |
+| Password complexity | Enabled |
+| Account lockout threshold | 5 invalid attempts |
+| Account lockout duration | 30 minutes |
+| Reset lockout counter after | 30 minutes |
+
+![Password policy settings applied via GPO](screenshots/05-password-policy.png)
+![Account lockout policy settings applied via GPO](screenshots/06-lockout-policy.png)
+
+### 5. Join the Workstation to the Domain
+`SALES-PC01` (Windows 11 Pro) was pointed at `DC01` for DNS (a required prerequisite — a client can't resolve or join a domain using a generic gateway's DNS), then joined to `corp.local` via **System Properties → Change → Domain**. John Doe was then able to authenticate directly at the Windows login screen as `corp\jdoe`.
+
+![Domain login screen — "Sign in to: CORP"](screenshots/07-domain-login-screen.png)
+
+### 6. Push Resources via Group Policy
+Two separate GPOs, both linked to the `Sales` OU and scoped under **User Configuration → Preferences**, delivered resources to John Doe's desktop automatically on login — no manual configuration on the client:
+
+- **Mapped Drive** — `S:` → `\\DC01\SalesShare`
+- **Shared Printer** — `\\DC01\SalesPrinter` (a driver-only virtual printer, since no physical device was available — Windows still treats it as a real shared print queue for GPO purposes)
+
+![GPO configuration for the mapped drive](screenshots/08-gpo-drive-map-config.png)
+![Mapped S: drive visible in File Explorer](screenshots/09-mapped-drive-result.png)
+![GPO configuration for the shared printer](screenshots/10-gpo-printer-config.png)
+![Sales Printer visible under John Doe's account on the domain-joined PC](screenshots/11-mapped-printer-result.png)
 
 ---
 
-# Portfolio Value
+## The Troubleshooting Moment: A Real GPO Precedence Bug
 
-This lab is useful as a portfolio project because it tells a complete operational story instead of showing only a set of screenshots.
+After configuring the lockout policy, I deliberately triggered it to simulate a locked-out user calling the helpdesk — by running **15+ failed authentication attempts** against the domain via `runas /user:corp\jdoe cmd`. Each attempt correctly returned:
 
-It demonstrates that the environment was not merely configured once: the lab was **tested, broken, investigated, corrected, and validated again**.
-
-That makes the project suitable for demonstrating practical understanding in interviews for roles involving:
-
-- IT Support / Support Engineering
-- Systems Administration
-- Windows Administration
-- Junior System Administration
-- Network / Infrastructure Support
-
----
-
-# Limitations and Next Steps
-
-This is a compact lab, not a production enterprise network. A future version could extend it with:
-
-- a second domain controller for redundancy
-- a dedicated DHCP server/scope
-- separate client and server network segments
-- more granular security groups and NTFS/share permissions
-- login scripts and additional GPO hardening
-- centralized Windows event collection
-- PowerShell automation for onboarding
-- backup and restore testing for Active Directory
-- a dedicated print server design
-- additional test users and departments
-- formal ticket documentation and incident timelines
-
----
-
-# Quick Command Reference
-
-```bat
-:: Network information
-ipconfig /all
-
-:: Gateway / server reachability
-ping 192.168.234.2
-ping 192.168.234.10
-
-:: DNS / domain resolution
-nslookup google.com
-ping corp.local
-
-:: Force Group Policy refresh
-gpupdate /force
-
-:: Inspect effective policy
-rsop.msc
-
-:: Clear existing SMB connections during credential testing
-net use * /delete
-
-:: Explicitly test domain credentials
-runas /user:corp\jdoe cmd
+```
+1326: The user name or password is incorrect.
 ```
 
-> **Security note:** The credentials used for this lab should be test-only credentials. Never publish real passwords, tokens, or production domain details in a public repository.
+...but the account never locked. This was unexpected, since the policy had already been verified as linked and configured.
+
+**Diagnosis:** `gpresult /r` on DC01 confirmed the `Password Policy` GPO *was* applying — but domain Account Lockout/Password policies are enforced based on **GPO link order precedence** at the domain root, not simply "is it linked." The built-in `Default Domain Policy` (which ships with every new AD forest, defaulting the lockout threshold to **0 = disabled**) was linked with *higher* priority than the custom policy, silently overriding it.
+
+```
+secpol.msc on DC01 showed:
+  Account lockout threshold: 0 invalid logon attempts   ← the bug
+```
+
+**Fix:** Reordered the GPO links at the domain root in Group Policy Management, promoting `Password Policy` above `Default Domain Policy` in link order, then forced a refresh (`gpupdate /force`).
+
+| Before | After |
+|---|---|
+| ![Lockout threshold showing 0 — the bug](screenshots/12-lockout-bug-threshold-zero.png) | ![Lockout threshold showing 5 — fixed](screenshots/13-lockout-bug-fixed.png) |
+
+Re-running the same failed-login test then correctly returned, on the 5th attempt:
+
+```
+1909: The referenced account is currently locked out and may not be logged on to.
+```
+
+This is a well-known real-world AD gotcha — domain account policies only take effect as intended when they win the link-order conflict against the defaults — and diagnosing it required reading `gpresult` output, understanding GPO precedence rules, and verifying the fix directly against `secpol.msc` rather than assuming the GPO editor's saved values were automatically "live."
+
+## The Ticket: Account Lockout → Resolution
+
+With the policy now genuinely enforced, the full helpdesk scenario was run end to end:
+
+1. **Lockout triggered** — 5 failed domain authentication attempts against `corp\jdoe`, confirmed via error `1909`.
+2. **Verified on DC01** — Active Directory Users and Computers → John Doe → Account tab showed the **"Unlock account — this account is currently locked out on this Active Directory Domain Controller"** flag.
+3. **Resolved** — Account unlocked, password reset with **"User must change password at next logon"** re-enabled (mirroring how a real reset is handled).
+4. **Confirmed fixed** — John Doe signed in successfully on `SALES-PC01` with the new temporary password and was prompted to set a permanent one on first login.
+
+This mirrors one of the single most common L1 helpdesk tickets in any real organization: *"I'm locked out, can you reset my password?"*
+
+## What This Demonstrates
+
+| Skill Area | Where It Shows Up |
+|---|---|
+| Active Directory administration | OU design, user/group creation, ADUC navigation |
+| Group Policy (GPO) | Drive mapping, printer deployment, password/lockout policy, **and diagnosing a real precedence conflict** |
+| DNS & networking fundamentals | Static IP configuration, pointing a client at the correct DNS server, `ipconfig`, `nslookup`, `ping` used throughout for diagnosis |
+| Windows client administration | Domain join, Windows 11 Pro setup, TPM/virtualization requirements |
+| Ticketing & troubleshooting logic | Reproducing a user-reported issue (lockout), verifying root cause before acting, documenting the fix |
+| CLI fluency | `ipconfig /all`, `nslookup`, `gpupdate /force`, `gpresult /r`, `runas`, `net use`, `secpol.msc` |
+
+## Known Simplifications
+
+In the interest of transparency (and because a real interviewer might ask): a few shortcuts were taken that a production environment would handle differently —
+- The shared folder permissions were set to `Everyone: Full Control` rather than scoped to the `Sales Team` security group specifically.
+- The shared printer has no physical hardware behind it — it exists purely to prove the GPO deployment mechanism.
+- Both VMs run as Windows evaluation/unactivated builds, which is standard for a lab but wouldn't fly in production.
 
 ---
 
-# Conclusion
-
-**Enterprise Windows Domain Lab — New Employee Onboarding with Active Directory, DNS & Group Policy** is a practical Windows infrastructure case study that models a complete onboarding and support workflow.
-
-Starting from an empty VMware environment, the lab builds a Windows Server 2022 domain controller, configures DNS and Active Directory, creates departmental structures, provisions a Sales employee, joins a Windows 11 workstation to the domain, deploys a shared drive and printer through Group Policy, and finally simulates and resolves an account-lockout incident.
-
-The most important outcome is the troubleshooting process: when DNS, GPO precedence, or authentication behaviour was not immediately correct, the issue was isolated using concrete tests such as `ipconfig`, `ping`, `nslookup`, `gpupdate`, `rsop.msc`, and explicit domain authentication tests before the final state was verified.
-
----
-
-## Lab Evidence Source
-
-This README was reconstructed from the complete attached lab conversation capture and its embedded screenshots. The screenshots in this repository are selected evidence crops from that material.
+*Built as a self-directed project to translate CompTIA-style theory (A+ / Network+ / Security+) into hands-on, reproducible IT Support experience.*
