@@ -1,4 +1,4 @@
-# New Hire, New Domain
+# Windows Domain Lab — New Employee Onboarding with Active Directory, DNS & Group Policy
 ### An Active Directory Home Lab — Onboarding a Sales Employee, End to End
 
 > Built from scratch in VMware Workstation to simulate the exact workflow an IT Support / Helpdesk tech performs when a new employee joins: standing up a domain, provisioning an account, pushing policy, joining a workstation, and resolving a lockout ticket.
